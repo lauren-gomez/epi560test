@@ -1,0 +1,201 @@
+---
+title: "EPI 560: Lab 9"
+author: "Lauren Gomez"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+    html_document:
+        df_print: paged
+        theme: cosmo
+        toc: yes
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "build") })
+---
+## Lab 9: Responses 
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+#Load libraries
+knitr::opts_chunk$set(echo = TRUE)
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(knitr)
+```
+
+## Step 1: Load and Merge NHANES Tables
+
+```{r rsq, echo=FALSE, message=FALSE, warning=FALSE}
+#Connect to the SQLite database
+db <- dbConnect(RSQLite::SQLite(), dbname = "/Users/gomezl4/Documents/PhD/EPI560/epi560.sqlite")
+
+#Confirm tablesloaded
+dbListTables(db)
+
+#SQL query to pull and join data needed for all subsequent steps
+sleep_data <- dbGetQuery(db, "
+  SELECT *
+  FROM P_SLQ
+  LEFT JOIN P_AUQ USING(SEQN)
+  LEFT JOIN P_PAQ USING(SEQN)
+  LEFT JOIN P_ALQ USING(SEQN)
+  LEFT JOIN P_GHB USING(SEQN);
+")
+
+#Prior code that only included SLQ and AUQ
+# sleep_data <- dbGetQuery(db, "
+#                                SELECT *
+#                                FROM P_SLQ
+#                                LEFT JOIN P_AUQ USING(SEQN);
+#                                ")
+
+
+#Disconnect from the database
+dbDisconnect(db)
+
+#View
+head(sleep_data)
+
+```
+
+## Step 2 & 3: Missingness and clean SLQ300 and SLQ310
+### Decision: Treat 77777 (Refused) and 99999 (Don't know) and blank (Missing) as NA
+```{r p2, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+data_q3 <- sleep_data %>%
+  mutate(
+    SLQ300_clean = ifelse(SLQ300 %in% c(77777, 99999, ""), NA, SLQ300),
+    SLQ310_clean = ifelse(SLQ310 %in% c(77777, 99999, ""), NA, SLQ310)
+  )
+
+# Frequencies before and after
+table(sleep_data$SLQ300, useNA = "ifany")
+table(data_q3$SLQ300_clean, useNA = "ifany")
+```
+###For SLQ300 there were 63 missing, 2 refused, and 73 don't know. Recoded all 138 to NA.
+
+## Part 4: Loop to apply cleaning to additional variables (SLQ320 and SLQ330)
+
+```{r part_4, echo=FALSE, message=FALSE, warning=FALSE}
+vars_to_clean <- c("SLQ300", "SLQ310", "SLQ320", "SLQ330")
+
+data_q4 <- sleep_data
+for (var in vars_to_clean) {
+  clean_var <- paste0(var, "_clean")
+  data_q4[[clean_var]] <- ifelse(data_q4[[var]] %in% c(77777, 99999, ""), NA, data_q4[[var]])
+}
+
+# Frequency table for SLQ320 after recoding
+table(data_q4$SLQ320_clean, useNA = "ifany")
+
+```
+##For SLQ320, after recoding, there are 138 NA. Prior to recoding there were 64 missing, 2 refused, and 72 don't know.
+###The loop saved time and avoids repeated blocks of code and ensures consistency (avoid potential errors when doing the same process multiple times by hand)
+
+
+
+## Part 5: Choose Variables of Interest
+
+```{r part_5}
+# Selected variables for future analysis:
+# - AUQ054 (Audiometry) - General condition of hearing (Would you say {your/his/her} hearing is excellent, good, that {you have/s/he has} a little trouble, moderate trouble, a lot of trouble, or {are you/is s/he} deaf?)
+# - SLQ050 (Sleep Disorders) - Ever told doctor had trouble sleeping?
+# - ALQ121 (Alcohol Use) - Past 12 mo how often drink alcoholic bev
+# - PAQ610 (Physical Activity) - Number of days vigorous work
+# - LBXGH (Glycohemoglobin) - Glycohemoglobin (%)
+
+
+
+```
+
+## Part 6: Clean selected variables
+###7, 99 corresponed to refused and don't know for categorical variables (ALQ121, PAQ610, AUQ054), except that SLQ050 is a yes/no q where 7 and 9 correspond to missing and don't know. Cleaned so that missing, don't know and refused to answer are NA, Cleaned continuous variable (LBXGH) using 95th and 5th percentiles to exclude outliers beyond 95th and 5th percentile.
+```{r part_6, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Show frequency tables for categorical variables (with NA counts)
+table(sleep_data$AUQ054, useNA = "ifany")   # General hearing condition
+table(sleep_data$SLQ050, useNA = "ifany")   # Trouble sleeping
+table(sleep_data$ALQ121, useNA = "ifany")   # Alcohol use frequency
+table(sleep_data$PAQ610, useNA = "ifany")   # Vigorous work days
+###77, 99 corresponed to refused and don't know for all, except that in a yes/no q - 7 and 9 correspond to missing and don't know
+
+# Show summary for continuous variable
+summary(sleep_data$LBXGH)
+
+
+#Clean variables 
+data_q6 <- sleep_data %>%
+  mutate(
+    PAQ610_clean = ifelse(PAQ610 %in% c(77, 99), NA, PAQ610),
+    ALQ121_clean = ifelse(ALQ121 %in% c(77, 99), NA, ALQ121),
+    AUQ054_clean = ifelse(AUQ054 %in% c(77, 99), NA, AUQ054),
+    SLQ050_clean = ifelse(SLQ050 %in% c(7, 9), NA, SLQ050),
+        LBXGH_clean = LBXGH
+
+  )
+
+# Print original + cleaned variables for comparison
+kable(head(data_q6 %>%
+  select(PAQ610_clean,
+        ALQ121_clean,
+        LBXGH_clean,
+        AUQ054_clean,
+        SLQ050_clean)))
+
+
+```
+
+## Part 7: Write functions to clean data and plot histogram comparison of LBXGH before and after
+```{r part_7, echo=FALSE, message=FALSE, warning=FALSE}
+# Function to clean continuous variables using 95th and 5th percentiles
+clean_continuous <- function(vec) {
+  q5 <- quantile(vec, 0.05, na.rm = TRUE)
+  q95 <- quantile(vec, 0.95, na.rm = TRUE)
+  vec <- ifelse(vec < q5, q5,
+         ifelse(vec > q95, q95, vec))
+  return(vec)
+}
+
+# Generic categorical cleaner, assumes missing = 77 or 99
+clean_categorical <- function(vec) {
+  vec <- ifelse(vec %in% c(77, 99), NA, vec)
+  return(vec)
+}
+
+# Generic yes/no cleaner, assumes missing = 7, 9
+clean_yesno <- function(vec) {
+  vec <- ifelse(vec %in% c(7, 9), NA, vec)
+  return(vec)
+}
+
+# Apply cleaning functions to produce cleaned dataset
+data_q7 <- data_q6 %>%
+  mutate(
+    LBXGH_clean2 = clean_continuous(LBXGH_clean),
+    PAQ610_clean2 = clean_categorical(PAQ610_clean),
+    ALQ121_clean2 = clean_categorical(ALQ121_clean),
+    AUQ054_clean2 = clean_categorical(AUQ054_clean),
+    SLQ050_clean2 = clean_yesno(SLQ050_clean)
+  )
+
+# Preview cleaned data
+kable(head(data_q7 %>%
+  select(PAQ610_clean,
+        ALQ121_clean,
+        LBXGH_clean,
+        AUQ054_clean,
+        SLQ050_clean)))
+
+# Histogram comparison of LBXGH before and after cleaning
+par(mfrow = c(1, 2))
+hist(data_q6$LBXGH_clean, main = "Original Glycohemoglobin", xlab = "%")
+hist(data_q7$LBXGH_clean2, main = "Cleaned Glycohemoglobin", xlab = "%")
+
+```
+
+###Note, cleaned continuous variable using 95th and 5th percentiles to exclude outliers
+
+\pagebreak  
+
+# Code Appendix  
+ 
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE} 
+```
